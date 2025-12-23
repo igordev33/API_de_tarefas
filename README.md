@@ -22,14 +22,19 @@ O projeto utiliza **Docker** para garantir que a aplicação rode de forma consi
 DATABASE_URL = sqlite:///./Tarefas.db
 meu_usuario = admin
 minha_senha = admin
+```
 
 2. Build do container:
 
+```cmd
 docker compose build
+```
 
 3. Rodar a aplicação:
 
+```cmd
 docker compose up
+```
 
 ## 📝 Funcionalidades
 
