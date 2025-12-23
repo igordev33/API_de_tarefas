@@ -23,6 +23,8 @@ DATABASE_URL = sqlite:///./Tarefas.db
 meu_usuario = admin
 minha_senha = admin
 ```
+- A aplicação ficará disponível em http://localhost:8000
+- Documentação interativa do FastAPI: http://localhost:8000/docs
 
 2. Build do container:
 
@@ -58,6 +60,24 @@ docker compose up
 ### Autenticação via HTTP Basic
 - Todas as rotas são protegidas
 - Credenciais padrão: admin / admin
+
+## 🚀 Tecnologias
+
+- Python 3.13
+
+- FastAPI
+
+- SQLAlchemy
+
+- Pydantic
+
+- SQLite
+
+- HTTP Basic Auth
+
+- Uvicorn
+
+- Docker + Docker Compose
 
 
 
