@@ -3,11 +3,13 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from typing import Optional
-from sqlalchemy import Boolean, create_engine, Column, Integer, String, func
+from sqlalchemy import Boolean, create_engine, func
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session, Mapped, mapped_column
 import os
 from dotenv import load_dotenv
+import redis
+import json
 
 load_dotenv()
 
@@ -40,10 +42,10 @@ minha_senha = require_env("minha_senha")
 
 class TarefaDB(Base):
     __tablename__ = "Tarefas"
-    id = Column(Integer, index=True, primary_key=True, autoincrement=True)
-    nome = Column(String, index=True)
-    descricao = Column(String, index=True)
-    concluida = Column(Boolean)
+    id: Mapped[int] = mapped_column(index=True, primary_key=True, autoincrement=True)
+    nome: Mapped[str] = mapped_column()
+    descricao: Mapped[str] = mapped_column()
+    concluida: Mapped[bool] = mapped_column(Boolean)
 
 class Tarefa(BaseModel):
     nome: str
@@ -59,6 +61,14 @@ def session_db():
     finally:
         db.close()
 
+redis_client = redis.Redis(host="redis", port=6379, decode_responses=True)
+
+def salvar_tarefa_redis(tarefa_id: int, tarefa: Tarefa):
+    redis_client.set(f"tarefa: {tarefa_id}", json.dumps(tarefa.model_dump()))
+
+def deletar_tarefa_redis(tarefa_id: int):
+    redis_client.delete(f"tarefa: {tarefa_id}")
+
 #Funcão responsável por autenticar o usuário
 def autenticar_usuario(credentials: HTTPBasicCredentials = Depends(security)):
     is_username_correct = secrets.compare_digest(credentials.username, meu_usuario)
@@ -70,11 +80,43 @@ def autenticar_usuario(credentials: HTTPBasicCredentials = Depends(security)):
             detail="Usuário ou senha incorretos!",
             headers={"WWW-Authenticate": "Basic"}
         )
+    
+@app.get("/debug/redis")
+def get_tarefas_redis():
+    cache_key = redis_client.keys("Tarefas:*")
+
+    if not cache_key:
+        return {"message": "Nenhum item em cache no Redis!"}
+    
+    resultado = []
+
+    for key in cache_key: # type: ignore
+        value = redis_client.get(key)
+        ttl = redis_client.ttl(key)
+        resultado.append({
+            "key": key,
+            "ttl": ttl,
+            "valor": json.loads(value) # type: ignore
+        })
+
+    return {
+        "total_itens": len(resultado),
+        "cache": resultado
+    }
 
 #Getter function
 @app.get("/buscar_tarefas")
 def get_tarefas(page: int = 1, limit: int = 10, db = Depends(session_db), ordenar_por: str = "id", credentials: HTTPBasicCredentials = Depends(autenticar_usuario)):
 
+    if page < 1 or limit < 1:
+        raise HTTPException(status_code=400, detail="Página ou limite inválidos!")
+
+    cache_key=f"Tarefas:*:page={page}:limit={limit}:order={ordenar_por}"
+    cached = redis_client.get(cache_key)
+
+    if cached:
+        return json.loads(cached) # type: ignore
+    
     query = db.query(TarefaDB)
 
     if ordenar_por == "id":
@@ -92,14 +134,8 @@ def get_tarefas(page: int = 1, limit: int = 10, db = Depends(session_db), ordena
 
     if not tarefas:
         return{"message": "Você não possui tarefas cadastradas!"}
-    
-    if page < 1 or limit < 1:
-        raise HTTPException(
-            status_code=400,
-            detail="Página ou limite inválidos!"
-        )
 
-    return {
+    resposta = {
         "page": page,
         "limit": limit,
         "total": db.query(func.count(TarefaDB.id)).scalar(),
@@ -107,6 +143,10 @@ def get_tarefas(page: int = 1, limit: int = 10, db = Depends(session_db), ordena
             {"id": tarefa.id, "nome": tarefa.nome, "descricao": tarefa.descricao, "concluida": tarefa.concluida} for tarefa in tarefas
             ] 
     }
+
+    redis_client.setex(cache_key, 30, json.dumps(resposta))
+    return resposta
+    
 
 #Post function
 @app.post("/adicionar_tarefa")
@@ -126,11 +166,13 @@ def post_tarefa(tarefa: Tarefa, db = Depends(session_db), credentials: HTTPBasic
     db.commit()
     db.refresh(nova_tarefa)
 
+    salvar_tarefa_redis(int(nova_tarefa.id), tarefa) # type:ignore
+
     return {"message": "A tarefa foi cadastrada com sucesso!"}
 
 #delete function
 @app.delete("/deletar_tarefa/{nome_tarefa}")
-def excluir_tarefa(nome_tarefa: str, db = Depends(session_db), credentials: HTTPBasicCredentials = Depends(autenticar_usuario)):
+def excluir_tarefa(nome_tarefa: str, db: Session = Depends(session_db), credentials: HTTPBasicCredentials = Depends(autenticar_usuario)):
     
     tarefa_db = db.query(TarefaDB).filter(TarefaDB.nome == nome_tarefa).first()
 
@@ -139,16 +181,19 @@ def excluir_tarefa(nome_tarefa: str, db = Depends(session_db), credentials: HTTP
     
     db.delete(tarefa_db)
     db.commit()
+    db.refresh(tarefa_db)
+
+    deletar_tarefa_redis(tarefa_db.id) # type: ignore
 
     return {"message": "Tarefa excluída com sucesso!"}
 
 
 
 #Função que conclui a tarefa
-@app.put("/concluir_tarefa/{nome_tarefa}")
-def concluir_tarefa(nome_tarefa: str, db = Depends(session_db), credentials: HTTPBasicCredentials = Depends(autenticar_usuario)):
+@app.put("/concluir_tarefa/{tarefa_id}")
+def concluir_tarefa(tarefa_id: int, db: Session = Depends(session_db), credentials: HTTPBasicCredentials = Depends(autenticar_usuario)):
 
-    db_tarefa = db.query(TarefaDB).filter(TarefaDB.nome == nome_tarefa).first()
+    db_tarefa = db.query(TarefaDB).filter(TarefaDB.id == tarefa_id).first()
 
     if not db_tarefa:
         raise HTTPException(
@@ -160,7 +205,7 @@ def concluir_tarefa(nome_tarefa: str, db = Depends(session_db), credentials: HTT
     db.commit()
     db.refresh(db_tarefa)
 
-    return {"message": f'Tarefa "{nome_tarefa}" concluída com sucesso!'}
+    return {"message": f'Tarefa concluída com sucesso!'}
     
 
 
